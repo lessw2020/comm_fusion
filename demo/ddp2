@@ -1,3 +1,4 @@
+from msilib.schema import InstallUISequence
 from functorch.compile import aot_function, aot_module, draw_graph
 from torch import nn
 from torch.distributed import ProcessGroup
@@ -42,7 +43,7 @@ class DTensorType(Enum):
 
 @dataclass
 class DTensorTag:
-    dt_tagtype: DTensorType = DTensorType.Replicated
+    dttype: DTensorType = DTensorType.Replicated
     pg: ProcessGroup = None
 
 
@@ -95,3 +96,109 @@ class Engine:
         self.module = module
         self.train_step = train_step
         self.bucket_mb = bucket_mb
+
+        self.num_grads = sum([p.requires_grad for p in module.parameters()])
+
+        self.primal_to_param = {}
+        self.grad_to_primal = {}
+
+        self.compiled = None
+
+    def run(self, x: torch.Tensor):
+        if self.compiled is None:
+            self.compiled = aot_module(self.module, self.compile_fwd, self.compile_bwd)
+
+        self.compile(x).sum().backward()
+
+    def compile_fwd(self, gm: fx.GraphModule, inputs):
+        # use pytree order to map to primals, save for bwd
+        def to_param(model: nn.Module, primal_name: str) -> torch.nn.Parameter:
+            index = int(primal_name.split("_")(-1)) - 1
+            params = [
+                p for _, p in list(pytree.tree_flatten(model.named_parameters()[0][0]))
+            ]
+            return params[index] if index < len(params) else None
+
+        logging.info("Compiling forward")
+        gm.graph.print_tabular()
+        # get tags on each param
+        for node in gm.graph.nodes:
+            if node.op == "placeholder" and node.target.startswith("primal"):
+                p = to_param(self.module, node.name)
+                if p is not None:
+                    assert (
+                        node.target not in self.primal_to_param
+                    ), f"inserting {node.target} twice"
+                    self.primal_to_param[node.target] = p
+
+        logging.info(
+            "\nFinished fwd compile, identified following DTs\n"
+            + "\n".join(
+                [f"{pl}:{pm._dtags}" for pl, pm in self.primal_to_param.items()]
+            )
+        )
+
+        return gm
+    
+    def compile_bwd(self, gm: fx.GraphModule, inputs):
+        logging.info("compiling bwd")
+        logging.info("Original bwd graph")
+        gm.graph.print_tabular()
+
+        # insert individual all reduce
+        pgs={}
+        for node in gm.graph.nodes:
+            if node.op == "output":
+                # relying on assumption of primal and gradient ordering is the same
+                for i, grad_node in enumerate(node.args[0][:self.num_grads]):
+                    primal = f"primals_{i+1}"
+                    self.grad_to_primal[grad_node.name]=primal
+                    for dtag in self.primal_to_param[primal]._dtags:
+                        if dtag.dttype = DTensorType.Replicated:
+                            with gm.graph.inserting_after(grad_node):
+                                gm.graph.call_function(
+                                    allreduce, args=(grad_node, dtag.pg)
+                                )
+                                pgs[grad_node]=dtag.pg
+                break
+        
+        # fuse all reduce ops based on bucket size
+        comm_args, comm_nodes = [], []
+        comm_size = 0
+        pg = None
+
+        for node in gm.graph.nodes:
+            if node.name.startswith("allreduce"):
+                comm_args.append(node.args[0])
+                comm_size += self.primal_to_param[
+                    self.grad_to_primal[node.args[0].name]
+                ].numel()
+                comm_nodes.append(node)
+                assert(pg is None or pg == pg[node.args[0]]), "expecting same pg instance"
+                pg = pgs[node.args[0]]
+                last_node=node
+
+                if comm_size >= self.bucket_mb*1e6:
+                    # accumulated comm size > bucket size, lets fuse them
+                    with gm.graph.inserting_after(last_node):
+                        gm.graph.call_function(fused_allreduce, args= (comm_args, pg))
+
+                    comm_args=[]
+                    comm_size= 0
+
+        if len(comm_args)>0:
+            with gm.graph.inserting_after(last_node):
+                gm.graph.call_function(fused_allreduce, args=(comm_args, pg))            
+
+        for node in comm_nodes:
+            gm.graph.erase_node(node)
+        
+        gm.graph.lint()
+        gm.recompile()
+        logging.info("Modified backward graph")
+        print(f"----- Updated Graph ----")
+        gm.graph.print_tabular()
+
+        logging.info("finished compiling backward")
+        return gm
+        
