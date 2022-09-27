@@ -21,6 +21,8 @@ from typing import (
 
 import logging
 import os
+import argparse
+import config.ddp_config as config
 
 
 class MyModel(nn.Module):
@@ -91,7 +93,7 @@ class Engine:
     Then based on the tags in local module,
     insert comms ops and fuse them."""
 
-    def __init__(self, module, train_step, bucket_mb: int = 5):
+    def __init__(self, module, train_step, bucket_mb: int = 1e6):
         self.module = module
         self.train_step = train_step
         self.bucket_mb = bucket_mb
@@ -211,25 +213,53 @@ def train_step(model: nn.Module, x: torch.Tensor):
 
 
 def run_worker(rank, world_size):
+    # get config
+    cfg = config.TrainConfig()
+
     logging.getLogger().setLevel(logging.DEBUG if rank == 0 else logging.CRITICAL)
     dist.init_process_group("gloo", rank=rank, world_size=world_size)
 
-    num_features = 10_000
+    num_features = cfg.num_features
     # create on cpu
     model = MyModel(num_features, 4)
     # tag all params as replicated
     model = DDP(model)
 
     # compile train_step, insert comm ops based on tags and fuse
-    engine = Engine(model, train_step)
-    for i in range(3):
+    engine = Engine(model, train_step, bucket_mb=cfg.bucket_size)
+
+    for i in range(cfg.iterations):
         logging.info(f"--- iteration {i+1} ==========")
         x = torch.randn(2, num_features)
         engine.run(x)
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="PyTorch experiments with SPMD")
+    parser.add_argument(
+        "--mode",
+        default="ddp",
+        metavar="string",
+        choices=["ddp", "fspd"],
+        help="choose mode to run, available: `ddp`, `fsdp (soon)` (default: ddp)",
+    )
+    args = parser.parse_args()
+    return args
+
+
 if __name__ == "__main__":
+    args = parse_args()
+    if args.mode == "ddp":
+        import config.ddp_config as config
+
+        print("imported ddp config")
+    elif args.mode == "fsdp":
+        import config.fsdp_config as config
+    else:
+        raise ValueError("unknown mode.")
+
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "29501"
     world_size = 2
+
     mp.spawn(run_worker, args=(world_size,), nprocs=world_size, join=True)
