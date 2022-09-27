@@ -1,0 +1,80 @@
+from functorch.compile import aot_function, aot_module, draw_graph
+from torch import nn
+from torch.distributed import ProcessGroup
+
+import torch
+import torch.distributed as dist
+import torch.fx as fx
+import torch.multiprocessing as mp
+import torch.util._pytree as pytree
+
+from dataclasses import dataclass
+from enum import Enum, auto
+from functools import partial
+
+from typing import ( 
+    Any,
+    Callable,
+    List,
+    Optional,
+
+)
+
+import logging
+import os
+
+class MyModel(nn.Module):
+    def __init__(self, num_features, num_layers):
+        super().__init__()
+        self.seq = nn.Sequential(*[nn.Linear(num_features, num_features) for _ in range(num_layers)])
+
+    def forward(self, x):
+        return self.seq(x)
+
+class DTensorType(Enum):
+    Replicated = auto()
+    Sharded = auto()
+    Partial = auto()
+
+@dataclass
+class DTensorTag:
+    dt_tagtype: DTensorType = DTensorType.Replicated
+    pg: ProcessGroup = None
+
+class DDP(nn.Module, tag_type=DTensorType.Replicated):
+    """ Tag each param as type Replicated"""
+    def __init__(self, module, pg =None):
+        super().__init__()
+        self.module = module
+    
+    for p in module.parameters():
+        if not hasattr(p,"_dtags"):
+            p._dtags = []
+        
+        p._dtags.append = DTensorTag(tag_type, pg = pg)
+
+    def forward(self, *args, **kwargs):
+        return self.module(*args, **kwargs)
+    
+def allreduce(tensor, pg):
+    logging.info(f"AllReduce Tensor of shape {tensor.shape}")
+    dist.all_reduce(tensor, group=pg)
+
+def fused_allreduce(tensors,pg):
+    logging.info(f"Fused AllReduce Tensor of shape {[t.shape for t in tensors]}")
+    buffer= torch.empty(sum([t.numel() for t in tensors]))
+    offset = 0
+    for t in tensors:
+        numel = t.numel()
+        buffer[offset:offset+numel] = t.view(-1)
+        offset+=numel
+    
+    dist.all_reduce(buffer, group = pg)
+
+    offset = 0
+    for t in tensors:
+        numel=t.numel()
+        t = buffer[offset:offset + numel].view(t.shape)
+        offset += numel
+    
+    
