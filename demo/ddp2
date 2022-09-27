@@ -12,69 +12,86 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
 
-from typing import ( 
+from typing import (
     Any,
     Callable,
     List,
     Optional,
-
 )
 
 import logging
 import os
 
+
 class MyModel(nn.Module):
     def __init__(self, num_features, num_layers):
         super().__init__()
-        self.seq = nn.Sequential(*[nn.Linear(num_features, num_features) for _ in range(num_layers)])
+        self.seq = nn.Sequential(
+            *[nn.Linear(num_features, num_features) for _ in range(num_layers)]
+        )
 
     def forward(self, x):
         return self.seq(x)
+
 
 class DTensorType(Enum):
     Replicated = auto()
     Sharded = auto()
     Partial = auto()
 
+
 @dataclass
 class DTensorTag:
     dt_tagtype: DTensorType = DTensorType.Replicated
     pg: ProcessGroup = None
 
+
 class DDP(nn.Module, tag_type=DTensorType.Replicated):
-    """ Tag each param as type Replicated"""
-    def __init__(self, module, pg =None):
+    """Tag each param as type Replicated"""
+
+    def __init__(self, module, pg=None):
         super().__init__()
         self.module = module
-    
+
     for p in module.parameters():
-        if not hasattr(p,"_dtags"):
+        if not hasattr(p, "_dtags"):
             p._dtags = []
-        
-        p._dtags.append = DTensorTag(tag_type, pg = pg)
+
+        p._dtags.append = DTensorTag(tag_type, pg=pg)
 
     def forward(self, *args, **kwargs):
         return self.module(*args, **kwargs)
-    
+
+
 def allreduce(tensor, pg):
     logging.info(f"AllReduce Tensor of shape {tensor.shape}")
     dist.all_reduce(tensor, group=pg)
 
-def fused_allreduce(tensors,pg):
+
+def fused_allreduce(tensors, pg):
     logging.info(f"Fused AllReduce Tensor of shape {[t.shape for t in tensors]}")
-    buffer= torch.empty(sum([t.numel() for t in tensors]))
+    buffer = torch.empty(sum([t.numel() for t in tensors]))
     offset = 0
     for t in tensors:
         numel = t.numel()
-        buffer[offset:offset+numel] = t.view(-1)
-        offset+=numel
-    
-    dist.all_reduce(buffer, group = pg)
+        buffer[offset : offset + numel] = t.view(-1)
+        offset += numel
+
+    dist.all_reduce(buffer, group=pg)
 
     offset = 0
     for t in tensors:
-        numel=t.numel()
-        t = buffer[offset:offset + numel].view(t.shape)
+        numel = t.numel()
+        t = buffer[offset : offset + numel].view(t.shape)
         offset += numel
-    
-    
+
+
+class Engine:
+    """compile the train_step function.
+    Then based on the tags in local module,
+    insert comms ops and fuse them."""
+
+    def __init__(self, module, train_step, bucket_mb: int = 25):
+        self.module = module
+        self.train_step = train_step
+        self.bucket_mb = bucket_mb
