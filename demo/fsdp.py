@@ -82,7 +82,8 @@ def ondemand_allgather(param, pg):
     #print(f"orig_size = {orig_size}")
     with torch.no_grad():
         world_size = dist.get_world_size(group=pg)
-        print(f"world_size = {world_size}")
+        rank = dist.get_rank(group=pg)
+        print(f"world_size = {world_size} and rank = {rank}")
         print(f"device = {param.device}")
         buffer = torch.empty([world_size] + list(local_shard.shape), device=param.device)
         print(f"buffer = {buffer.shape}")
@@ -115,9 +116,11 @@ def ondemand_reducescatter(grad, pg):
     with torch.no_grad():
         world_size = dist.get_world_size(group=pg)
         rank = dist.get_rank(group=pg)
-
+        print(f"REDUCE SCATTER with rank {rank}")
         padded_size = int(math.ceil(grad.numel() / world_size))
         output = torch.empty([padded_size], device=grad.device)
+        print(f"reduce scatter output = {output}")
+
         inputs_tensor = torch.empty([padded_size * world_size], device=grad.device)
         inputs_tensor[:grad.numel()].copy_(grad.view(-1))
         inputs = list(inputs_tensor.chunk(world_size))
@@ -160,8 +163,14 @@ class Engine:
         self.view_to_parent = {}
         self.primal_to_param = {}
         self.grad_to_primal = {}
+
         self.pytree_params = [p for _, p in list(pytree.tree_flatten(module.named_parameters())[0][0])]
+        self.rank = dist.get_rank()
+        #if self.rank==0:
+        #    print(f"pytree_params dict = {self.pytree_params}")
         self.pytree_params.reverse()
+        #if self.rank==0:
+        #    print(f"reversed = {self.pytree_params}")
 
         self.compiled_m = None
         # HACK: FSDP triggers recompilation after sharding param storage. To
@@ -212,11 +221,18 @@ class Engine:
             rank = dist.get_rank(group=pg)
 
             padded_size = int(math.ceil(param.numel() / world_size))
+            if rank==0:
+                print(f"padded size = {padded_size}")
             buffer = torch.empty([padded_size], device=param.device)
             offset = rank * padded_size
+            print(f"offset for rank {rank} = {offset}")
+
             to = min(offset + padded_size, param.numel())
+            print(f"to for rank {rank} = {to}")
+
             buffer[:(to - offset)] = param.view(-1)[offset : to]
             param._local_shard = buffer
+            print(f"param local shard = {buffer.size()}")
             param._orig_size = param.size()
             # HACK: cannot set param.data to the shard yet, because AOTAutograd
             # requires to run the module once to get the graph. Eventually, we
@@ -437,9 +453,9 @@ def run_worker(rank, world_size):
     logging.getLogger().setLevel(logging.DEBUG if rank == 0 else logging.CRITICAL)
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
-    n_features = 20
+    n_features = 30
     # create local model on CPU
-    model = MyModel(n_features, 2)
+    model = MyModel(n_features, 3)
     # tag all parameters as replicated tensor
     # model = DDP(model)
     model.to(rank)
