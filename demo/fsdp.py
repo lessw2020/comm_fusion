@@ -28,7 +28,7 @@ import os
 class MyModel(nn.Module):
     def __init__(self, n_features, n_layers):
         super().__init__()
-        self.seq = nn.Sequential(*[nn.Linear(n_features, n_features) for _ in range(n_layers)])
+        self.seq = nn.Linear(n_features, n_features)# nn.Sequential(*[nn.Linear(n_features, n_features) for _ in range(n_layers)])
 
     def forward(self, x):
         return self.seq(x)
@@ -73,20 +73,30 @@ class FSDP(nn.Module):
 
 
 def ondemand_allgather(param, pg):
-    logging.info(f"AllGather param {param.shape}")
+    logging.info(f"AllGather for param {param.shape}")
     # HACK: using attributes on the parameter to keep track of local shard and
     # original size. These should all be handled by DistributedTensor when ready.
     local_shard = param._local_shard
     orig_size = param._orig_size
+    #print(f"local_shard = {local_shard}")
+    #print(f"orig_size = {orig_size}")
     with torch.no_grad():
         world_size = dist.get_world_size(group=pg)
+        print(f"world_size = {world_size}")
+        print(f"device = {param.device}")
         buffer = torch.empty([world_size] + list(local_shard.shape), device=param.device)
+        print(f"buffer = {buffer.shape}")
         tensors = [buffer[i] for i in range(world_size)]
         # HACK: using synchronous allgather to demonstrate feasibility. This
         # should be asynchronous in the final stack.
+        #print(f"tensors = {tensors}")
+        #print(f"world_size = {world_size}")
         dist.all_gather(tensors, local_shard, group=pg)
+        print(f"dist all gather complete")
         size = list(orig_size)
+        print(f"size = {size}")
         numel = reduce(lambda x, y: x * y, size, 1)
+        print(f"numel = {numel}")
         param.data = buffer[:numel].view(size)
 
     return param
@@ -111,6 +121,7 @@ def ondemand_reducescatter(grad, pg):
         inputs_tensor = torch.empty([padded_size * world_size], device=grad.device)
         inputs_tensor[:grad.numel()].copy_(grad.view(-1))
         inputs = list(inputs_tensor.chunk(world_size))
+        print(f"calling reduce scatter on rank {rank}")
         dist.reduce_scatter(output, inputs, group=pg)
         return output
 
@@ -170,9 +181,18 @@ class Engine:
             self.compiled_m = aot_module(self.module, self._compile_fwd, self._compile_bwd)
 
         if self.fwd_gm is None or self.bwd_gm is None:
+            if not self.fwd_gm:
+                print(f"self.fwd gm is NONE")
+            if not self.bwd_gm:
+                print(f"self.bwd gem is None")
             # HACK: AOTAutograd cannot trace the train_step yet, so compile the
             # module for now.
             self.compiled_m(x)
+            if not self.fwd_gm:
+                print(f"self.fwd gm is NONE post compile")
+            if not self.bwd_gm:
+                print(f"self.bwd gem is None post compile")
+            print(f"compiled ready = {self.compiled_m is not None}")
             assert self.fwd_gm is not None and self.bwd_gm is not None, (
                 "Forward and backward GraphModules are not generated."
             )
