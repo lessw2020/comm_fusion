@@ -242,6 +242,7 @@ class Engine:
     # parent view.
     def _find_primal_views(self, gm: fx.GraphModule, primal: fx.Node) -> Dict[fx.Node, fx.Node]:
         view_to_parent = {primal: primal}
+        print(f"find primal views = {primal}")
         for node in gm.graph.nodes:
             if all([
                 node.op == "call_function" and
@@ -250,7 +251,7 @@ class Engine:
                 node.args[0] in view_to_parent
             ]):
                 view_to_parent[node] = node.args[0]
-
+        print(f"primal returning {view_to_parent}")
         return view_to_parent
 
     # Find all usages on parameter and its views in the graph. This later helps
@@ -270,7 +271,8 @@ class Engine:
         views = self._find_primal_views(gm, primal)
         self.view_to_parent.update(views)
         usages = self._find_param_usages(gm, set(views.keys()))
-
+        print(f"Alert: ")
+        print(f"usages = {usages}")
         # insert allgather before first usage
         with gm.graph.inserting_before(usages[0]):
             new_node = gm.graph.call_function(
@@ -294,7 +296,9 @@ class Engine:
             return params[idx] if idx < len(params) else None
 
         logging.info("Compiling forward")
-        gm.graph.print_tabular()
+        rank = dist.get_rank()
+        if rank==0:
+            gm.graph.print_tabular()
         # get tags on each param
         for node in gm.graph.nodes:
             if node.op == "placeholder" and node.target.startswith("primal"):
@@ -336,7 +340,8 @@ class Engine:
         gm.graph.lint()
         gm.recompile()
         logging.info("Modified forward")
-        gm.graph.print_tabular()
+        if rank==0:
+            gm.graph.print_tabular()
         # HACK: record the graph and directly call it.
         self.fwd_gm = gm
         return gm
