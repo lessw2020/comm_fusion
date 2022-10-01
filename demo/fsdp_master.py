@@ -159,7 +159,7 @@ class Engine:
         self.pytree_params = [
             p for _, p in list(pytree.tree_flatten(module.named_parameters())[0][0])
         ]
-        self.pytree_params.reverse()
+        
 
         self.compiled_m = None
         # HACK: FSDP triggers recompilation after sharding param storage. To
