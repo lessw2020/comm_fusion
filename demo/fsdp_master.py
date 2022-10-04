@@ -21,6 +21,7 @@ import torch.utils._pytree as pytree
 from functorch.compile import aot_function
 from functorch.compile import aot_module
 from functorch.compile import draw_graph
+from functorch.compile import make_boxed_func, make_boxed_compiler
 from torch import nn
 from torch.distributed import ProcessGroup
 
@@ -177,24 +178,40 @@ class Engine:
     def run(self, x: torch.Tensor):
         if self.compiled_m is None:
             self.compiled_m = aot_module(
-                self.module, self._compile_fwd, self._compile_bwd
+                self.module, 
+                fw_compiler=self._compile_fwd, 
+                bw_compiler=self._compile_bwd,
             )
+        rank = dist.get_rank()
+        if rank==0:
+            print("Engine: inside RUN ")
 
         if self.fwd_gm is None or self.bwd_gm is None:
             # HACK: AOTAutograd cannot trace the train_step yet, so compile the
             # module for now.
             self.compiled_m(x)
             assert (
-                self.fwd_gm is not None and self.bwd_gm is not None
-            ), "Forward and backward GraphModules are not generated."
+                self.fwd_gm is not None
+            ), "Forward GraphModule was not generated."
+
+            #assert( self.bwd_gm is not None),"Backward GraphModule was not generated."
 
         # HACK: Have to directly call fwd and bwd GraphModule to avoid
         # recompilation. Ideally, it will be helpful to control which guards
         # can be skipped.
+        rank = dist.get_rank()
+        if rank==0:
+            print(f"about to call forward....")
+            print(f"args = {len(self.pytree_params)}")
+
         outs = self.fwd_gm(*self.pytree_params, x)
         out, activations = outs[0], outs[1:]
-        # HACK: using a fack grad for output to trigger backward
+        if rank==0:
+            print(f"\nout size = {len(out)},{type(out)}, {out[0].shape}, {out[1].shape},{out}, activations = {len(activations[0])}, {activations[0].shape},\n{activations}")
+        # HACK: using a fake grad for output to trigger backward
         out_grad = torch.ones_like(out)
+        if rank==0:
+            print(f"\nabout to call Backward...\n")
         self.bwd_gm(*activations, out_grad)
 
     def _prepare_param_shard(self, param: torch.nn.Parameter, pg: ProcessGroup):
@@ -316,15 +333,24 @@ class Engine:
         gm.graph.lint()
         gm.recompile()
         logging.info("Modified forward")
-        gm.graph.print_tabular()
+        rank = dist.get_rank()
+        if rank==0:
+            gm.graph.print_tabular()
+
         # HACK: record the graph and directly call it.
+        print(f"about to call fwd gm.....")
+        
         self.fwd_gm = gm
-        return gm
+        return make_boxed_func(gm)
 
     def _compile_bwd(self, gm: fx.GraphModule, inps):
         logging.info("Compiling backward")
         logging.info("Original backward graph")
-        gm.graph.print_tabular()
+        rank = dist.get_rank()
+
+        if rank==0:
+            print(f" ^^^^^^^ Inside _compile_bwd ^^^^^^^^^^^^^^")
+            gm.graph.print_tabular()
 
         # insert individual allgather
         view_name_to_node = {v.name: v for v, p in self.view_to_parent.items()}
@@ -383,7 +409,8 @@ class Engine:
                 gm.graph.erase_node(node)
 
         logging.info("After recover param primals")
-        gm.graph.print_tabular()
+        if rank==0:
+            gm.graph.print_tabular()
 
         logging.info("Insert Grad ReduceScatter")
         for node in gm.graph.nodes:
@@ -412,12 +439,18 @@ class Engine:
         gm.graph.lint()
         gm.recompile()
         logging.info("Modified backward graph")
-        gm.graph.print_tabular()
+        rank= dist.get_rank()
+        if rank==0:
+            gm.graph.print_tabular()
 
         logging.info("finished compiling backward")
         # HACK: record the graph and directly call it.
+        
+        if rank==0:
+            print(f"backward compile boxing")
+
         self.bwd_gm = gm
-        return gm
+        return make_boxed_func(gm) # make_boxed_func(gm)
 
 
 ################################################################################
@@ -439,8 +472,9 @@ def run_worker(rank, world_size):
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
     n_features = 20
+    n_layers = 1
     # create local model on CPU
-    model = MyModel(n_features, 2)
+    model = MyModel(n_features, n_layers)
     # tag all parameters as replicated tensor
     # model = DDP(model)
     model.to(rank)

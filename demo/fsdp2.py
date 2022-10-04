@@ -26,10 +26,10 @@ import math
 import os
 
 class MyModel(nn.Module):
-    def __init__(self, n_features, n_layers):
+    def __init__(self, n_features, n_layers, bias=False):
         super().__init__()
-        #self.seq = nn.Sequential(*[nn.Linear(n_features, n_features) for _ in range(n_layers)])
-        self.seq = nn.Linear(n_features, n_features)
+        self.seq = nn.Sequential(*[nn.Linear(n_features, n_features, bias=bias) for _ in range(n_layers)])
+        #self.seq = nn.Linear(n_features, n_features, bias=bias)
     def forward(self,x):
         return self.seq(x)
 
@@ -59,16 +59,23 @@ class FSDP(nn.Module):
         _tag_module(module, DTensorTag(dttype=DTensorType.ONDEMAND, pg=pg))
     
     def forward(self, *args, **kwargs):
+        print(f"about to call forward for rank {dist.get_rank()}")
+        print(self.module)
         return self.module(*args, **kwargs)
     
 def ondemand_allgather(param, pg):
     logging.info(f"Allgather param - {param.shape}")   
     local_shard = param._local_shard
-    orig_size = param.orig_size
+    orig_size = param._orig_size
+
     with torch.no_grad():
         world_size = dist.get_world_size(group=pg)
         buffer = torch.empty([world_size]+ list(local_shard.shape), device=param.device)
         tensors = [buffer[i] for i in range(world_size)]
+        rank = dist.get_rank()
+        if rank ==0:
+            print(f"on demand all gather with rank {rank}")
+
         dist.all_gather(tensors, local_shard, group=pg)
         size = list(orig_size)
         numel = reduce(lambda x, y: x*y, size, 1)
@@ -95,7 +102,7 @@ def ondemand_reducescatter(grad, pg):
         return output
 
 class Engine:
-    def __init__(self, module, train_step):
+    def __init__(self, module, train_step, reverse_params=True):
         self.module = module
         self.train_step = train_step
         self.n_grads = sum([p.requires_grad for p in module.parameters()])
@@ -103,8 +110,13 @@ class Engine:
         self.view_to_parent= {}
         self.primal_to_param = {}
         self.grad_to_primal = {}
+
+        reverse_params=True
+
+        
         self.pytree_params = [p for _, p in list(pytree.tree_flatten(module.named_parameters())[0][0])]
-        self.pytree_params.reverse()
+        if reverse_params:
+            self.pytree_params.reverse()
 
         self.compiled_m = None
         self.fwd_gm = None
@@ -123,12 +135,33 @@ class Engine:
         if self.fwd_gm is None or self.bwd_gm is None:
             self.compiled_m(x)
             assert self.fwd_gm is not None, ("missing fwd gm")
-            assert self.bwd_gm is not None, ("missing bwd gm")
+            #assert self.bwd_gm is not None, ("missing bwd gm")
         
+        rank = dist.get_rank()
+        if rank==0:
+            print(f"input tensor x = {x.shape}")
+
+            print(f"pytree params = {self.pytree_params}")
+
+        no_reverse=False
+        #if no_reverse:
+        #    self.pytree_params.reverse()
+
         outs = self.fwd_gm(*self.pytree_params, x)
+        if rank==0:
+            print(f" outs = {outs}")
+
         out, activations = outs[0], outs[1:]
         out_grad = torch.ones_like(out)
-        self.bwd_gm(*activations, out_grad)
+        if rank==0:
+            print(f"out_grad = {out_grad}")
+
+        if self.bwd_gm:
+            self.bwd_gm(*activations, out_grad)
+        
+        #if not no_reverse:
+        #    self.pytree_params.reverse()
+        print(f"exiting run for rank {rank}..........")
 
     
 
@@ -173,8 +206,7 @@ class Engine:
         views = self._find_primal_views(gm, primal)
         self.view_to_parent.update(views)
         usages = self._find_param_usages(gm, set(views.keys()))
-        print(f"Alert: ")
-        print(f"usages = {usages}")
+        
         # insert allgather before first usage
         with gm.graph.inserting_before(usages[0]):
             new_node = gm.graph.call_function(
@@ -342,7 +374,7 @@ def run_worker(rank, world_size):
     logging.getLogger().setLevel(logging.DEBUG if rank==0 else logging.CRITICAL)
     dist.init_process_group("nccl", rank = rank, world_size = world_size)
 
-    n_features=30
+    n_features=4
     model=MyModel(n_features, 3)
     model.to(rank)
     model = FSDP(model)

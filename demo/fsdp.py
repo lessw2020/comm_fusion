@@ -28,7 +28,7 @@ import os
 class MyModel(nn.Module):
     def __init__(self, n_features, n_layers):
         super().__init__()
-        self.seq = nn.Linear(n_features, n_features)# nn.Sequential(*[nn.Linear(n_features, n_features) for _ in range(n_layers)])
+        self.seq = nn.Sequential(*[nn.Linear(n_features, n_features, bias=True) for _ in range(n_layers)])
 
     def forward(self, x):
         return self.seq(x)
@@ -165,10 +165,7 @@ class Engine:
         self.grad_to_primal = {}
 
         self.pytree_params = [p for _, p in list(pytree.tree_flatten(module.named_parameters())[0][0])]
-        self.rank = dist.get_rank()
-        #if self.rank==0:
-        #    print(f"pytree_params dict = {self.pytree_params}")
-        self.pytree_params.reverse()
+        #self.pytree_params.reverse()
         #if self.rank==0:
         #    print(f"reversed = {self.pytree_params}")
 
@@ -202,9 +199,9 @@ class Engine:
             if not self.bwd_gm:
                 print(f"self.bwd gem is None post compile")
             print(f"compiled ready = {self.compiled_m is not None}")
-            assert self.fwd_gm is not None and self.bwd_gm is not None, (
-                "Forward and backward GraphModules are not generated."
-            )
+            #assert self.fwd_gm is not None and self.bwd_gm is not None, (
+            #    "Forward and backward GraphModules are not generated."
+            #)
 
         # HACK: Have to directly call fwd and bwd GraphModule to avoid
         # recompilation. Ideally, it will be helpful to control which guards
