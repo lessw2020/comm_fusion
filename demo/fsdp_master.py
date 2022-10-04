@@ -22,6 +22,10 @@ from functorch.compile import aot_function
 from functorch.compile import aot_module
 from functorch.compile import draw_graph
 from functorch.compile import make_boxed_func, make_boxed_compiler
+from functorch.compile import (min_cut_rematerialization_partition,
+    default_partition,
+    draw_graph,
+    draw_joint_graph,)
 from torch import nn
 from torch.distributed import ProcessGroup
 
@@ -178,9 +182,10 @@ class Engine:
     def run(self, x: torch.Tensor):
         if self.compiled_m is None:
             self.compiled_m = aot_module(
-                self.module, 
+                mod=self.module, 
                 fw_compiler=self._compile_fwd, 
                 bw_compiler=self._compile_bwd,
+                partition_fn = default_partition
             )
         rank = dist.get_rank()
         if rank==0:
@@ -190,6 +195,7 @@ class Engine:
             # HACK: AOTAutograd cannot trace the train_step yet, so compile the
             # module for now.
             self.compiled_m(x)
+            print(f"self.compiled_m = {self.compiled_m}")
             assert (
                 self.fwd_gm is not None
             ), "Forward GraphModule was not generated."
@@ -341,6 +347,7 @@ class Engine:
         print(f"about to call fwd gm.....")
         
         self.fwd_gm = gm
+        
         return make_boxed_func(gm)
 
     def _compile_bwd(self, gm: fx.GraphModule, inps):
@@ -349,7 +356,7 @@ class Engine:
         rank = dist.get_rank()
 
         if rank==0:
-            print(f" ^^^^^^^ Inside _compile_bwd ^^^^^^^^^^^^^^")
+            print(f"\n^^^^^^^ Inside _compile_bwd ^^^^^^^^^^^^^^\n\n\n\n")
             gm.graph.print_tabular()
 
         # insert individual allgather
@@ -503,5 +510,5 @@ if __name__ == "__main__":
 
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "29500"
-    world_size = 2
+    world_size = 1
     mp.spawn(run_worker, args=(world_size,), nprocs=world_size, join=True)
