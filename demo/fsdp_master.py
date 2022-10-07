@@ -36,6 +36,7 @@ class MyModel(nn.Module):
         self.seq = nn.Sequential(
             *[nn.Linear(n_features, n_features) for _ in range(n_layers)]
         )
+        print(f"self.seq = {self.seq[0].weight}")
 
     def forward(self, x):
         return self.seq(x)
@@ -99,7 +100,10 @@ def ondemand_allgather(param, pg):
         size = list(orig_size)
         numel = reduce(lambda x, y: x * y, size, 1)
         param.data = buffer[:numel].view(size)
-
+        #print(f"all gather final tensor requires grad: {param.requires_grad}")
+    param.data.requires_grad=True
+    #print(f"all gather final tensor requires grad: {param.requires_grad}")
+    #print(f"\n all gather Param = {param}")
     return param
 
 
@@ -110,6 +114,10 @@ def ondemand_discard(param, _):
     logging.info(f"Discard param {param.shape}")
     with torch.no_grad():
         param.data = param._local_shard
+        #print(f"discard param {param.data.requires_grad}")
+    param.data.requires_grad=True
+    #print(f"discard param {param.data.requires_grad}")
+
 
 
 def ondemand_reducescatter(grad, pg):
@@ -195,7 +203,7 @@ class Engine:
             # HACK: AOTAutograd cannot trace the train_step yet, so compile the
             # module for now.
             self.compiled_m(x)
-            print(f"self.compiled_m = {self.compiled_m}")
+            #print(f"self.compiled_m = {self.compiled_m}")
             assert (
                 self.fwd_gm is not None
             ), "Forward GraphModule was not generated."
@@ -206,9 +214,9 @@ class Engine:
         # recompilation. Ideally, it will be helpful to control which guards
         # can be skipped.
         rank = dist.get_rank()
-        if rank==0:
-            print(f"about to call forward....")
-            print(f"args = {len(self.pytree_params)}")
+        #if rank==0:
+            #print(f"about to call forward....")
+            #print(f"args = {len(self.pytree_params)}")
 
         outs = self.fwd_gm(*self.pytree_params, x)
         out, activations = outs[0], outs[1:]
@@ -216,9 +224,11 @@ class Engine:
             print(f"\nout size = {len(out)},{type(out)}, {out[0].shape}, {out[1].shape},{out}, activations = {len(activations[0])}, {activations[0].shape},\n{activations}")
         # HACK: using a fake grad for output to trigger backward
         out_grad = torch.ones_like(out)
-        if rank==0:
-            print(f"\nabout to call Backward...\n")
+        #if rank==0:
+            #print(f"\nabout to call Backward...\n")
         self.bwd_gm(*activations, out_grad)
+        if rank==0:
+            print(f"\nBackward direct call completed \n")
 
     def _prepare_param_shard(self, param: torch.nn.Parameter, pg: ProcessGroup):
         with torch.no_grad():
@@ -510,5 +520,5 @@ if __name__ == "__main__":
 
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "29500"
-    world_size = 1
+    world_size = 4
     mp.spawn(run_worker, args=(world_size,), nprocs=world_size, join=True)
