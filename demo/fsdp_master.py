@@ -29,6 +29,7 @@ from functorch.compile import (min_cut_rematerialization_partition,
 from torch import nn
 from torch.distributed import ProcessGroup
 
+import models
 
 class MyModel(nn.Module):
     def __init__(self, n_features, n_layers):
@@ -491,7 +492,8 @@ def run_worker(rank, world_size):
     n_features = 20
     n_layers = 1
     # create local model on CPU
-    model = MyModel(n_features, n_layers)
+    model = models.GPTSmall(vocab_size=3072, block_size=128)
+    #model = MyModel(n_features, n_layers)
     # tag all parameters as replicated tensor
     # model = DDP(model)
     model.to(rank)
