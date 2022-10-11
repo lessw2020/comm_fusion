@@ -14,6 +14,7 @@ from typing import Optional
 from typing import Set
 
 import torch
+import torch.nn as nn
 import torch.distributed as dist
 import torch.fx as fx
 import torch.multiprocessing as mp
@@ -204,13 +205,19 @@ class Engine:
             # HACK: AOTAutograd cannot trace the train_step yet, so compile the
             # module for now.
             res = self.compiled_m(x)
-            print(f"res result = {res}")
+            print(f"res result = {res.shape}")
             #print(f"self.compiled_m = {self.compiled_m}")
-            assert (
-                self.fwd_gm is not None
-            ), "Forward GraphModule was not generated."
-            print(f"---> calling backward =======")
-            res.sum().backward()
+            #assert (
+            #    self.fwd_gm is not None
+            #), "Forward GraphModule was not generated."
+            #print(f"---> calling backward =======")
+            #loss = nn.CrossEntropyLoss()
+            #target = torch.ones_like(res)
+            #target = torch.empty(2, dtype=torch.long, device = res.device).random_(5)
+            #output = loss(res, target)
+            #output.backward()
+
+            #res.sum().backward()
             #assert( self.bwd_gm is not None),"Backward GraphModule was not generated."
 
         # HACK: Have to directly call fwd and bwd GraphModule to avoid
@@ -221,15 +228,20 @@ class Engine:
             #print(f"about to call forward....")
             #print(f"args = {len(self.pytree_params)}")
 
-        outs = self.fwd_gm(*self.pytree_params, x)
-        out, activations = outs[0], outs[1:]
+        #outs = self.fwd_gm(*self.pytree_params, x)
+        #out, activations = outs[0], outs[1:]
         if rank==0:
-            print(f"\nout size = {len(out)},{type(out)}, {out[0].shape}, {out[1].shape},{out}, activations = {len(activations[0])}, {activations[0].shape},\n{activations}")
+            pass
+            #print(f"\nout size = {len(out)},{type(out)}, {out[0].shape}, {out[1].shape},{out}, activations = {len(activations[0])}, {activations[0].shape},\n{activations}")
         # HACK: using a fake grad for output to trigger backward
-        out_grad = torch.ones_like(out)
+        #print(f"type of out = {out.shape} and shape of activations = {activations[0].shape}")
+        external_grads = torch.ones_like(res)
+        print(f"shape of external grads = {external_grads.shape}")
+
         if rank==0:
+            #print(f"out grads size = {out_grad.shape}")
             print(f"\nabout to call Backward...\n")
-        #outs.backward()
+        res.backward(gradient=external_grads) #external_grads)
 
         #self.bwd_gm(*activations, out_grad)
         if rank==0:
@@ -301,6 +313,14 @@ class Engine:
         with gm.graph.inserting_after(usages[-1]):
             gm.graph.call_function(ondemand_discard, args=(primal, usages[-1]))
 
+    def display_graph(self, fx_module: fx.GraphModule)-> None:
+        print(f"-*20")
+        print(fx_module.code)
+        print("=*30")
+        print(fx_module.graph.print_tabular())
+
+        return fx_module
+        
     def _compile_fwd(self, gm: fx.GraphModule, inps):
         # HACK: use pytree order of params to map to primals, and save the info
         # for compile_bwd.
@@ -312,6 +332,9 @@ class Engine:
             return params[idx] if idx < len(params) else None
 
         logging.info("Compiling forward")
+        self.display_graph(gm)
+        return make_boxed_func(gm)
+
         gm.graph.print_tabular()
         # get tags on each param
         for node in gm.graph.nodes:
@@ -369,6 +392,9 @@ class Engine:
         logging.info("Compiling backward")
         logging.info("Original backward graph")
         rank = dist.get_rank()
+
+        self.display_graph(gm)
+        return make_boxed_func(gm)
 
         if rank==0:
             print(f"\n $$$$$$$ Inside _compile_bwd $$$$$ \n\n\n\n")
@@ -472,7 +498,7 @@ class Engine:
             print(f"backward compile boxing")
 
         self.bwd_gm = gm
-        return make_boxed_func(gm) # make_boxed_func(gm)
+        return gm # make_boxed_func(gm) # make_boxed_func(gm)
 
 
 ################################################################################
@@ -526,5 +552,5 @@ if __name__ == "__main__":
 
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "29500"
-    world_size = 2
+    world_size = 1
     mp.spawn(run_worker, args=(world_size,), nprocs=world_size, join=True)
