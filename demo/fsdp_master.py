@@ -37,7 +37,7 @@ class MyModel(nn.Module):
         self.seq = nn.Sequential(
             *[nn.Linear(n_features, n_features) for _ in range(n_layers)]
         )
-        print(f"self.seq = {self.seq[0].weight}")
+        #print(f"self.seq = {self.seq[0].weight}")
 
     def forward(self, x):
         return self.seq(x)
@@ -203,12 +203,14 @@ class Engine:
         if self.fwd_gm is None or self.bwd_gm is None:
             # HACK: AOTAutograd cannot trace the train_step yet, so compile the
             # module for now.
-            self.compiled_m(x)
+            res = self.compiled_m(x)
+            print(f"res result = {res}")
             #print(f"self.compiled_m = {self.compiled_m}")
             assert (
                 self.fwd_gm is not None
             ), "Forward GraphModule was not generated."
-
+            print(f"---> calling backward =======")
+            res.sum().backward()
             #assert( self.bwd_gm is not None),"Backward GraphModule was not generated."
 
         # HACK: Have to directly call fwd and bwd GraphModule to avoid
@@ -225,9 +227,11 @@ class Engine:
             print(f"\nout size = {len(out)},{type(out)}, {out[0].shape}, {out[1].shape},{out}, activations = {len(activations[0])}, {activations[0].shape},\n{activations}")
         # HACK: using a fake grad for output to trigger backward
         out_grad = torch.ones_like(out)
-        #if rank==0:
-            #print(f"\nabout to call Backward...\n")
-        self.bwd_gm(*activations, out_grad)
+        if rank==0:
+            print(f"\nabout to call Backward...\n")
+        #outs.backward()
+
+        #self.bwd_gm(*activations, out_grad)
         if rank==0:
             print(f"\nBackward direct call completed \n")
 
@@ -367,7 +371,7 @@ class Engine:
         rank = dist.get_rank()
 
         if rank==0:
-            print(f"\n^^^^^^^ Inside _compile_bwd ^^^^^^^^^^^^^^\n\n\n\n")
+            print(f"\n $$$$$$$ Inside _compile_bwd $$$$$ \n\n\n\n")
             gm.graph.print_tabular()
 
         # insert individual allgather
@@ -492,8 +496,8 @@ def run_worker(rank, world_size):
     n_features = 20
     n_layers = 1
     # create local model on CPU
-    model = models.GPTSmall(vocab_size=3072, block_size=128)
-    #model = MyModel(n_features, n_layers)
+    #model = models.GPTSmall(vocab_size=3072, block_size=128)
+    model = MyModel(n_features, n_layers)
     # tag all parameters as replicated tensor
     # model = DDP(model)
     model.to(rank)
@@ -522,5 +526,5 @@ if __name__ == "__main__":
 
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "29500"
-    world_size = 4
+    world_size = 2
     mp.spawn(run_worker, args=(world_size,), nprocs=world_size, join=True)
